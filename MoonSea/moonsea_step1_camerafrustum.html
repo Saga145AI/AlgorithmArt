@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Step 1 · 视线发射：罗德里格斯旋转与地平线摇曳</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #info {
+    position: fixed; top: 16px; left: 16px; color: rgba(255,255,255,0.7);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 13px; line-height: 1.6; pointer-events: none;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.8);
+  }
+  #info h1 { font-size: 15px; font-weight: 600; margin-bottom: 4px; color: #f0c674; }
+  #hud {
+    position: fixed; bottom: 16px; left: 16px;
+    font-family: monospace; font-size: 12px; color: rgba(255,255,255,0.6);
+    pointer-events: none;
+  }
+  #controls {
+    position: fixed; bottom: 16px; right: 16px;
+    font-family: -apple-system, "PingFang SC", sans-serif; font-size: 12px;
+  }
+  #controls button {
+    background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3);
+    color: #fff; padding: 4px 10px; margin-left: 4px; cursor: pointer; border-radius: 4px;
+  }
+  #controls button.active { background: rgba(240,198,116,0.4); border-color: #f0c674; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info">
+  <h1>Step 1 / 5 · 视线发射：罗德里格斯旋转与地平线摇曳</h1>
+  Rodrigues rotation + sin(tilt) · focal = 1.5 + sin(t*0.18)*0.25<br>
+  视锥网格在地平线处随呼吸缩放摇曳
+</div>
+<div id="hud">--</div>
+<div id="controls">
+  <button data-s="0" class="active">自动</button>
+  <button data-s="1">高</button>
+  <button data-s="2">中</button>
+  <button data-s="3">低</button>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false });
+if (!gl) {
+  document.body.innerHTML = '<p style="color:#fff;padding:40px;font-family:sans-serif">您的浏览器不支持 WebGL2</p>';
+  throw new Error('WebGL2 not supported');
+}
+
+const vsSource = `#version 300 es
+in vec2 a_position;
+void main() { gl_Position = vec4(a_position, 0.0, 1.0); }
+`;
+
+const fsSource = `#version 300 es
+precision highp float;
+
+uniform vec2  u_resolution;
+uniform float u_time;
+uniform vec2  u_mouse;
+
+out vec4 fragColor;
+
+// Rodrigues rotation matrix (strictly from original)
+mat3 createRotationMatrixAxisAngle(vec3 axis, float angle) {
+    float s  = sin(angle);
+    float c  = cos(angle);
+    float oc = 1.0 - c;
+    return mat3(
+        oc*axis.x*axis.x + c,          oc*axis.x*axis.y - axis.z*s,   oc*axis.z*axis.x + axis.y*s,
+        oc*axis.x*axis.y + axis.z*s,   oc*axis.y*axis.y + c,           oc*axis.y*axis.z - axis.x*s,
+        oc*axis.z*axis.x - axis.y*s,   oc*axis.y*axis.z + axis.x*s,   oc*axis.z*axis.z + c
+    );
+}
+
+vec3 getRay(vec2 fragCoord) {
+    vec2 uv = ((fragCoord / u_resolution.xy) * 2.0 - 1.0)
+            * vec2(u_resolution.x / u_resolution.y, 1.0);
+
+    // No tilt - original shader has no roll animation
+
+    float focal = 1.5 + sin(u_time * 0.18) * 0.25;
+    vec3 proj = normalize(vec3(uv, focal));
+
+    if (u_resolution.x < 600.0) return proj;
+
+    vec2  mouse  = u_mouse.xy / u_resolution.xy;
+    float mouseY = mouse.y == 0.0 ? 0.42 : mouse.y;
+
+    return createRotationMatrixAxisAngle(vec3(0.0, -1.0, 0.0), -6.0 * mouse.x)
+         * createRotationMatrixAxisAngle(vec3(1.0,  0.0, 0.0), 1.0 - 3.0 * mouseY)
+         * proj;
+}
+
+void main() {
+    vec3 ray = getRay(gl_FragCoord.xy);
+
+    // Visualize ray direction as frustum grid
+    // Sky (ray.y >= 0): dark indigo gradient
+    // Sea (ray.y < 0): dark teal gradient
+    // Horizon line at ray.y = 0
+
+    float elev = ray.y;
+
+    // Sky side: indigo gradient
+    vec3 zenith  = vec3(0.02, 0.03, 0.08) * 2.0;
+    vec3 horizon = vec3(0.05, 0.07, 0.14);
+    vec3 sky = mix(horizon, zenith, pow(clamp(elev, 0.0, 1.0), 0.6));
+    sky += vec3(0.04, 0.06, 0.12) * exp(-clamp(elev, 0.0, 1.0) * 10.0);
+
+    // Sea side: dark teal
+    vec3 seaBase = vec3(0.01, 0.03, 0.06);
+    vec3 seaDeep = vec3(0.003, 0.01, 0.03);
+    vec3 sea = mix(seaBase, seaDeep, smoothstep(-0.5, -2.0, elev));
+
+    vec3 col = elev >= 0.0 ? sky : sea;
+
+    // Draw perspective grid on sea side to show ray direction
+    if (elev < 0.0) {
+        // Project ray onto sea plane (y=0) from camera at y=3.5
+        float t = 3.5 / (-elev); // distance to y=0 plane
+        vec3 hitPos = ray * t;
+
+        // Grid lines
+        float gx = 1.0 - smoothstep(0.0, 0.06, abs(fract(hitPos.x * 0.3) - 0.5) - 0.46);
+        float gz = 1.0 - smoothstep(0.0, 0.06, abs(fract(hitPos.z * 0.3) - 0.5) - 0.46);
+        float grid = max(gx, gz);
+
+        // Fade with distance
+        float fade = smoothstep(200.0, 5.0, t);
+        col += vec3(0.12, 0.25, 0.35) * grid * fade;
+    }
+
+    // Bright horizon glow line
+    float horizonLine = exp(-abs(elev) * 50.0) * 0.6;
+    col += vec3(0.10, 0.14, 0.20) * horizonLine;
+
+    // Draw radiation lines from vanishing point (sky side)
+    if (elev >= 0.0) {
+        float angle = atan(ray.z, ray.x);
+        float radLines = 1.0 - smoothstep(0.0, 0.015, abs(fract(angle / 3.14159 * 8.0) - 0.5) - 0.47);
+        col += vec3(0.06, 0.08, 0.14) * radLines * smoothstep(0.0, 0.3, elev);
+
+        // Depth rings from vanishing point
+        float depthRing = 1.0 - smoothstep(0.0, 0.008, abs(fract(elev * 5.0) - 0.5) - 0.48);
+        col += vec3(0.08, 0.10, 0.16) * depthRing * 0.5;
+    }
+
+    // Add a subtle crosshair at the look direction (forward = +Z)
+    float crossX = 1.0 - smoothstep(0.0, 0.003, abs(ray.x));
+    float crossY = 1.0 - smoothstep(0.0, 0.003, abs(ray.y));
+    float crosshair = max(crossX * smoothstep(0.0, 0.1, abs(ray.y)),
+                          crossY * smoothstep(0.0, 0.1, abs(ray.x)));
+    col += vec3(0.3, 0.4, 0.5) * crosshair * 0.5;
+
+    fragColor = vec4(col, 1.0);
+}
+`;
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    alert('Shader compile error:\n' + gl.getShaderInfoLog(s));
+    console.error(gl.getShaderInfoLog(s));
+  }
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSource));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSource));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+  alert('Program link error:\n' + gl.getProgramInfoLog(prog));
+}
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+const posLoc = gl.getAttribLocation(prog, 'a_position');
+gl.enableVertexAttribArray(posLoc);
+gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+const uRes = gl.getUniformLocation(prog, 'u_resolution');
+const uTime = gl.getUniformLocation(prog, 'u_time');
+const uMouse = gl.getUniformLocation(prog, 'u_mouse');
+
+const SCALES = [1.0, 1.0, 0.66, 0.42];
+let scaleIdx = 0, renderScale = 1.0, autoMode = true, lastAdj = 0;
+const dtBuf = [];
+let mouseX = 0, mouseY = 0;
+
+canvas.addEventListener('mousemove', e => {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  mouseX = e.clientX * dpr;
+  mouseY = (canvas.clientHeight - e.clientY) * dpr;
+});
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const eff = dpr * renderScale;
+  canvas.width = Math.floor(innerWidth * eff);
+  canvas.height = Math.floor(innerHeight * eff);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+addEventListener('resize', resize); resize();
+
+document.querySelectorAll('#controls button').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#controls button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    scaleIdx = +b.dataset.s;
+    autoMode = scaleIdx === 0;
+    if (!autoMode) { renderScale = SCALES[scaleIdx]; resize(); }
+  });
+});
+
+const hudEl = document.getElementById('hud');
+const t0 = performance.now();
+let prevT = t0;
+
+function frame() {
+  const now = performance.now();
+  const dt = now - prevT; prevT = now;
+  dtBuf.push(dt);
+  if (dtBuf.length > 30) dtBuf.shift();
+  const dtAvg = dtBuf.reduce((a, b) => a + b, 0) / dtBuf.length;
+  if (autoMode && now - lastAdj > 1200) {
+    if (dtAvg > 24 && renderScale > 0.35) { renderScale *= 0.8; resize(); lastAdj = now; }
+    else if (dtAvg < 17.5 && renderScale < 1) { renderScale *= 1.15; if (renderScale > 1) renderScale = 1; resize(); lastAdj = now; }
+  }
+  hudEl.textContent = `FPS ${(1000/Math.max(dt,1)).toFixed(0)} · ${Math.round(renderScale*100)}%`;
+  gl.uniform2f(uRes, canvas.width, canvas.height);
+  gl.uniform1f(uTime, (now - t0) / 1000);
+  gl.uniform2f(uMouse, mouseX, mouseY);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>

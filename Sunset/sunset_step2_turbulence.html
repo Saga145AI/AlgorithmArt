@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Step 2 · 八阶正交置换湍流</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  canvas { position: absolute; top: 0; left: 0; display: block; width: 100vw; height: 100vh; }
+  #info {
+    position: fixed; top: 16px; left: 16px; color: rgba(255,255,255,0.72);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 13px; line-height: 1.6; pointer-events: none;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.85);
+  }
+  #info h1 { font-size: 15px; font-weight: 600; margin-bottom: 4px; color: #7ec8e3; }
+  #hud {
+    position: fixed; bottom: 16px; left: 16px; display: flex; align-items: center; gap: 8px;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 12px; color: rgba(255,255,255,0.78); user-select: none;
+  }
+  #hud span { text-shadow: 0 1px 4px rgba(0,0,0,0.85); min-width: 104px; }
+  #hud button {
+    background: rgba(255,255,255,0.12); color: rgba(255,255,255,0.85);
+    border: 1px solid rgba(255,255,255,0.25); border-radius: 6px;
+    padding: 3px 10px; font-size: 12px; cursor: pointer;
+  }
+  #hud button.on { background: rgba(126,200,227,0.35); border-color: rgba(126,200,227,0.7); color: #fff; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info">
+  <h1>Step 2 / 5 · 八阶正交置换湍流</h1>
+  p += amp · sin(p·f − vel·t).yzx / f，逐级倍频 f ×= 1.8<br>
+  YZX 轴向置换消除平移共线性，平板被撕成翻滚的碎形涡流
+</div>
+
+<div id="hud">
+  <span id="fps">-- FPS</span>
+  <button data-q="0" class="on">自动</button><button data-q="1">高</button><button data-q="2">中</button><button data-q="3">低</button>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false, depth: false, stencil: false, powerPreference: 'high-performance' });
+
+if (!gl) {
+  document.body.innerHTML = '<p style="color:#fff;padding:40px;font-family:sans-serif">您的浏览器不支持 WebGL2，请使用最新版 Chrome / Edge / Firefox</p>';
+  throw new Error('WebGL2 not supported');
+}
+
+const vsSource = `#version 300 es
+in vec2 a_position;
+void main() { gl_Position = vec4(a_position, 0.0, 1.0); }
+`;
+
+// ============================================================
+//  阶段二：八阶正交置换湍流循环
+//  在阶段一的基础上，进入采样点前先做 8 阶 YZX 正弦置换扰动
+// ============================================================
+const fsSource = `#version 300 es
+precision highp float;
+
+out vec4 fragColor;
+
+uniform vec2  u_resolution;
+uniform float u_time;
+
+#define STEPS         100.0
+#define FOV           1.0
+#define SOFTNESS      0.005
+#define PASSTHROUGH   0.2
+#define WAVE_STEPS    8.0                // 八阶
+#define WAVE_FREQ     5.0                // 起始频率
+#define WAVE_AMP      0.6                // 扰动幅度
+#define WAVE_EXP      1.8                // 逐级倍频指数
+#define WAVE_VEL      vec3(0.2)          // 相位流速
+#define GRAY_EXPOSURE 60.0
+
+void main() {
+    // ① 视锥发射
+    vec3 dir = normalize(vec3(2.0*gl_FragCoord.xy - u_resolution.xy, -FOV*u_resolution.y));
+
+    float z   = 0.0;
+    vec3  col = vec3(0.0);
+
+    for (float i = 0.0; i < STEPS; i += 1.0) {
+        vec3 p = z * dir;
+
+        // ② 八阶正交置换正弦湍流：YZX 置换 + 逐级倍频，自反馈撕裂平整度
+        float f = WAVE_FREQ;
+        for (float j = 0.0; j < WAVE_STEPS; j += 1.0) {
+            p += WAVE_AMP * sin(p*f - WAVE_VEL*u_time).yzx / f;
+            f *= WAVE_EXP;
+        }
+
+        // ③ 大气平板距离场 + 自适应步长
+        float s = 0.3 - abs(p.y);
+        float d = SOFTNESS + max(s, -s*PASSTHROUGH) / 4.0;
+        z += d;
+
+        col += vec3(max(s, 0.0)) / d;
+    }
+
+    col *= SOFTNESS / STEPS;
+    float g = tanh(col.r * GRAY_EXPOSURE);
+    fragColor = vec4(vec3(g), 1.0);
+}
+`;
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSource));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSource));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+  -1, -1,  1, -1,  -1, 1,
+  -1,  1,  1, -1,   1, 1
+]), gl.STATIC_DRAW);
+
+const posLoc = gl.getAttribLocation(prog, 'a_position');
+gl.enableVertexAttribArray(posLoc);
+gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+const uRes  = gl.getUniformLocation(prog, 'u_resolution');
+const uTime = gl.getUniformLocation(prog, 'u_time');
+
+// ---------- 画质控制 + 自适应渲染分辨率 ----------
+// 核显算不过来时自动降低渲染分辨率（画面由浏览器放大），流畅后自动升回
+const SCALES = [1.0, 1.0, 0.66, 0.42];   // 自动(基准)/高/中/低
+let qualityMode = 0;                      // 0 自动 | 1 高 | 2 中 | 3 低
+let renderScale = 1.0;                    // 自动模式下的动态缩放
+const MIN_SCALE = 0.35;
+let dtAvg = 16.7, lastT = performance.now(), lastAdjust = performance.now();
+const fpsEl = document.getElementById('fps');
+
+function resize() {
+  const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+  const s = qualityMode === 0 ? renderScale : SCALES[qualityMode];
+  const eff = Math.max(0.3, dpr * s);
+  const w = window.innerWidth  || document.documentElement.clientWidth  || 1;
+  const h = window.innerHeight || document.documentElement.clientHeight || 1;
+  const pw = Math.max(1, Math.floor(w * eff));
+  const ph = Math.max(1, Math.floor(h * eff));
+  canvas.style.width  = w + 'px';
+  canvas.style.height = h + 'px';
+  if (canvas.width !== pw || canvas.height !== ph) {
+    canvas.width  = pw;
+    canvas.height = ph;
+    gl.viewport(0, 0, pw, ph);
+  }
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', resize);
+window.addEventListener('pageshow', resize);
+if (window.ResizeObserver) new ResizeObserver(resize).observe(document.documentElement);
+resize();
+
+document.querySelectorAll('#hud button').forEach(function (b) {
+  b.addEventListener('click', function () {
+    qualityMode = +b.dataset.q;
+    document.querySelectorAll('#hud button').forEach(function (x) { x.classList.toggle('on', x === b); });
+    resize();
+  });
+});
+
+const t0 = performance.now();
+function frame(now) {
+  const dt = now - lastT; lastT = now;
+  if (dt > 0 && dt < 1000) dtAvg += (dt - dtAvg) * 0.05;
+
+  if (qualityMode === 0 && now - lastAdjust > 1200) {
+    if (dtAvg > 24 && renderScale > MIN_SCALE) {          // 低于 ~42 FPS：降档
+      renderScale = Math.max(MIN_SCALE, renderScale * 0.8);
+      resize(); lastAdjust = now;
+    } else if (dtAvg < 17.5 && renderScale < 1.0) {       // 跑满刷新率：升档
+      renderScale = Math.min(1.0, renderScale * 1.15);
+      resize(); lastAdjust = now;
+    }
+  }
+
+  gl.uniform2f(uRes, canvas.width, canvas.height);
+  gl.uniform1f(uTime, (performance.now() - t0) / 1000);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+  if (fpsEl && now - (fpsEl._t || 0) > 500) {
+    fpsEl._t = now;
+    const sc = qualityMode === 0 ? renderScale : SCALES[qualityMode];
+    fpsEl.textContent = Math.round(1000 / dtAvg) + ' FPS · ' + Math.round(sc * 100) + '%';
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
